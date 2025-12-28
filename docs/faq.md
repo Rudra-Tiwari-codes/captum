@@ -13,6 +13,7 @@ title: FAQ
 * [Do JIT models, DataParallel models, or DistributedDataParallel models work with Captum?](#do-jit-models-dataparallel-models-or-distributeddataparallel-models-work-with-captum)
 * [I am working on a new interpretability or attribution method and would like to add it to Captum. How do I proceed?](#i-am-working-on-a-new-interpretability-or-attribution-method-and-would-like-to-add-it-to-captum-how-do-i-proceed)
 * [I am using a gradient-based attribution algorithm such as integrated gradients for a RNN or LSTM network and I see 'cudnn RNN backward can only be called in training mode'. How can I resolve this issue ?](#how-can-I-resolve-cudnn-RNN-backward-error-for-RNN-or-LSTM-network)
+* [My model has internal learnable parameters (e.g., graph neural networks with adaptive adjacency matrices). How do I use Captum with such models?](#my-model-has-internal-learnable-parameters-eg-graph-neural-networks-with-adaptive-adjacency-matrices-how-do-i-use-captum-with-such-models)
 
 ### **How do I set the target parameter to an attribution method?**
 
@@ -74,3 +75,70 @@ We are still working out the logistics of setting these up and will update this 
 If your model is set in eval mode you might run into errors, such as `cudnn RNN backward can only be called in training mode`, when you try to perform backward pass on a RNN / LSTM model in a GPU environment.
 CuDNN with RNN / LSTM doesn't support gradient computation in eval mode that's why we need to disable cudnn for RNN in eval mode.
 To resolve the issue you can set`torch.backends.cudnn.enabled` flag to False - `torch.backends.cudnn.enabled=False`
+
+### **My model has internal learnable parameters (e.g., graph neural networks with adaptive adjacency matrices). How do I use Captum with such models?**
+
+Some models, particularly graph neural networks like GraphWaveNet, have internal learnable parameters (such as node embeddings that generate adaptive adjacency matrices) that are not passed as explicit inputs to the forward function. When using gradient-based attribution methods like Integrated Gradients, you may encounter dimension mismatch errors because Captum only scales the provided inputs along the integration path, but doesn't account for internal learnable state.
+
+**Example error:**
+```
+RuntimeError: expected input to have 10 channels, but got 12 channels instead
+```
+
+There are two approaches to resolve this:
+
+**Approach 1: Wrapper Function with additional_forward_args**
+
+Create a wrapper that exposes internal learnable parameters as additional forward arguments. This allows Captum to properly handle them:
+
+```python
+import torch
+from captum.attr import IntegratedGradients
+
+class ModelWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+    
+    def forward(self, x, node_embeddings):
+        # Pass embeddings explicitly so Captum can track them
+        # Modify based on your model's specific architecture
+        return self.model.forward_with_embeddings(x, node_embeddings)
+
+# Usage:
+wrapper = ModelWrapper(original_model)
+ig = IntegratedGradients(wrapper)
+
+# Get embeddings from your model
+node_emb = original_model.get_node_embeddings()
+
+# Create baselines for both input and embeddings
+input_baseline = torch.zeros_like(input_tensor)
+emb_baseline = torch.zeros_like(node_emb)
+
+# Attribute with embeddings as additional_forward_args
+attributions = ig.attribute(
+    input_tensor,
+    baselines=input_baseline,
+    target=target,
+    additional_forward_args=(node_emb,)
+)
+```
+
+**Approach 2: Use LayerIntegratedGradients**
+
+If you want to attribute with respect to a specific layer's output rather than the model inputs, use `LayerIntegratedGradients`:
+
+```python
+from captum.attr import LayerIntegratedGradients
+
+# Attribute to a specific layer (e.g., after the first conv layer)
+lig = LayerIntegratedGradients(model, model.start_conv)
+attributions = lig.attribute(input_tensor, target=target)
+```
+
+This approach computes attributions with respect to the layer's output, avoiding issues with internal state that affects earlier parts of the network.
+
+**Which approach to choose:**
+- Use **Approach 1** when you need attributions with respect to the original model inputs
+- Use **Approach 2** when attributing to an intermediate layer is acceptable for your use case
